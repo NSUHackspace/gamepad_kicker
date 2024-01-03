@@ -42,15 +42,15 @@ struct stepperInfo {
 
   // per movement variables (only changed once per movement)
   volatile int dir;                        // current direction of movement, used to keep track of position
-  volatile unsigned int totalSteps;        // number of steps requested for current movement
+  // volatile unsigned int totalSteps;        // number of steps requested for current movement
   volatile bool movementDone = false;      // true if the current movement has been completed (used by main program to wait for completion)
-  volatile unsigned int rampUpStepCount;   // number of steps taken to reach either max speed, or half-way to the goal (will be zero until this number is known)
+  // volatile unsigned int rampUpStepCount;   // number of steps taken to reach either max speed, or half-way to the goal (will be zero until this number is known)
 
   // per iteration variables (potentially changed every interrupt)
   volatile unsigned int n;                 // index in acceleration curve, used to calculate next interval
   volatile float d;                        // current interval length
   volatile unsigned long di;               // above variable truncated
-  volatile unsigned int stepCount;         // number of steps completed in current movement
+  // volatile unsigned int stepCount;         // number of steps completed in current movement
 };
 
 void xStep() {
@@ -85,20 +85,39 @@ void aDir(int dir) {
   digitalWrite(A_DIR_PIN, dir);
 }
 
-void resetStepperInfo( stepperInfo& si ) {
-  si.n = 0;
-  si.d = 0;
-  si.di = 0;
-  si.stepCount = 0;
-  si.rampUpStepCount = 0;
-  si.totalSteps = 0;
-  si.stepPosition = 0;
-  si.movementDone = false;
-}
+// void resetStepperInfo(volatile stepperInfo& si ) {
+//   si.n = 0;
+//   si.d = 0;
+//   si.di = 0;
+//   // si.stepCount = 0;
+//   // si.rampUpStepCount = 0;
+//   // si.totalSteps = 0;
+//   si.stepPosition = 0;
+//   si.movementDone = true;
+  
+// }
 
 #define NUM_STEPPERS 4
 
+#define CMD_MOVE_TO 0
+#define CMD_SET_SPEED 1
+#define CMD_SET_ACC 2
+#define CMD_RESET_POS 3
+
 volatile stepperInfo steppers[NUM_STEPPERS];
+volatile long destUpdates[NUM_STEPPERS];
+volatile bool hasDestUpdates[NUM_STEPPERS];
+
+typedef struct __attribute__ ((packed)) {
+    byte command;
+    byte motor;
+    union
+    {
+        float f;
+        long l;
+    };
+    
+} serial_msg_t;
 
 void setup() {
 
@@ -145,27 +164,43 @@ void setup() {
   steppers[3].stepFunc = aStep;
   steppers[3].acceleration = 4000;
   steppers[3].minStepInterval = 50;
+
+  for(int i = 0; i < NUM_STEPPERS; i++){
+    resetStepper(steppers[i]);
+    hasDestUpdates[i] = false;
+  }
+  Serial.begin(115200);
+  Serial.println("\nREADY!");
+  Serial.println(sizeof(serial_msg_t));
+
+  TIMER1_INTERRUPTS_ON
 }
 
 void resetStepper(volatile stepperInfo& si) {
   si.c0 = si.acceleration;
   si.d = si.c0;
   si.di = si.d;
-  si.stepCount = 0;
+  // si.stepCount = 0;
   si.n = 0;
-  si.rampUpStepCount = 0;
-  si.movementDone = false;
+  // si.rampUpStepCount = 0;
+  si.movementDone = true;
+  si.destination = 0;
+  si.stepPosition = 0;
 }
 
 volatile byte remainingSteppersFlag = 0;
 
-void prepareMovement(int whichMotor, int steps) {
-  volatile stepperInfo& si = steppers[whichMotor];
-  si.dirFunc( steps < 0 ? HIGH : LOW );
-  si.dir = steps > 0 ? 1 : -1;
-  si.totalSteps = abs(steps);
-  resetStepper(si);
-  remainingSteppersFlag |= (1 << whichMotor);
+void prepareMovement(int whichMotor, long dest) {
+  while (hasDestUpdates[whichMotor]);
+  destUpdates[whichMotor] = dest;
+  hasDestUpdates[whichMotor] = true;
+
+  // volatile stepperInfo& si = steppers[whichMotor];
+  // si.dirFunc( steps < 0 ? HIGH : LOW );
+  // si.dir = steps > 0 ? 1 : -1;
+  // si.totalSteps = abs(steps);
+  // resetStepper(si);
+  // remainingSteppersFlag |= (1 << whichMotor);
 }
 
 volatile byte nextStepperFlag = 0;
@@ -207,6 +242,24 @@ ISR(TIMER1_COMPA_vect)
   OCR1A = 65500;
 
   for (int i = 0; i < NUM_STEPPERS; i++) {
+    volatile stepperInfo& s = steppers[i];
+
+    if(hasDestUpdates[i]){
+      s.destination = destUpdates[i];
+      hasDestUpdates[i] = false;
+      if(s.movementDone && s.destination != s.stepPosition){
+        remainingSteppersFlag |= (1 << i);
+        nextStepperFlag |= (1 << i);
+        s.movementDone = false;
+        long distanceToGo = s.destination - s.stepPosition;
+        s.dirFunc( distanceToGo < 0 ? HIGH : LOW );
+        s.dir = distanceToGo > 0 ? 1 : -1;
+        s.c0 = s.acceleration;
+        s.d = s.c0;
+        s.di = s.d;
+      }
+
+    }
 
     if ( ! ((1 << i) & remainingSteppersFlag) )
       continue;
@@ -216,84 +269,158 @@ ISR(TIMER1_COMPA_vect)
       continue;
     }
 
-    volatile stepperInfo& s = steppers[i];
-
-    if ( s.stepCount < s.totalSteps ) {
+  
+    if ( s.stepPosition != s.destination || s.n > 1 ) {
       s.stepFunc();
-      s.stepCount++;
       s.stepPosition += s.dir;
-      if ( s.stepCount >= s.totalSteps ) {
+      if ( s.stepPosition == s.destination && s.n <= 1 ) {
         s.movementDone = true;
         remainingSteppersFlag &= ~(1 << i);
       }
     }
 
-    if ( s.rampUpStepCount == 0 ) {
-      s.n++;
-      s.d = s.d - (2 * s.d) / (4 * s.n + 1);
-      if ( s.d <= s.minStepInterval ) {
-        s.d = s.minStepInterval;
-        s.rampUpStepCount = s.stepCount;
-      }
-      if ( s.stepCount >= s.totalSteps / 2 ) {
-        s.rampUpStepCount = s.stepCount;
-      }
+    long distanceToGo = s.destination - s.stepPosition;
+    // stepsToStop is n
+    bool doAcc = false;
+    bool doDec = false;
+
+    if(distanceToGo > 0){
+      if((s.n >= distanceToGo) || s.dir == -1)doDec = true;
+      else doAcc = true;
     }
-    else if ( s.stepCount >= s.totalSteps - s.rampUpStepCount ) {
-      s.d = (s.d * (4 * s.n + 1)) / (4 * s.n + 1 - 2);
-      s.n--;
+    if(distanceToGo < 0 ) {
+      if((s.n >= -distanceToGo) || s.dir == 1)doDec = true;
+      else doAcc = true;
     }
 
+    if(doAcc){
+      // try to accelerate, we are going the correct way
+      if(s.d > s.minStepInterval){
+        s.n++;
+        s.d = s.d - (2 * s.d) / (4 * s.n + 1);
+      }
+    }else if (doDec && s.n != 0){
+      // decelerate
+      s.d = (s.d * (4 * s.n + 1)) / (4 * s.n + 1 - 2);
+      s.n--;
+    }else{
+      // n == 0, we need to choose direction
+      s.dirFunc( distanceToGo < 0 ? HIGH : LOW );
+      s.dir = distanceToGo > 0 ? 1 : -1;
+      s.c0 = s.acceleration;
+      s.d = s.c0;
+      s.di = s.d;
+    }
+
+
     s.di = s.d; // integer
+
+    // if ( s.stepCount < s.totalSteps ) {
+    //   s.stepFunc();
+    //   s.stepCount++;
+    //   s.stepPosition += s.dir;
+    //   if ( s.stepCount >= s.totalSteps ) {
+    //     s.movementDone = true;
+    //     remainingSteppersFlag &= ~(1 << i);
+    //   }
+    // }
+
+    // if ( s.rampUpStepCount == 0 ) {
+    //   s.n++;
+    //   s.d = s.d - (2 * s.d) / (4 * s.n + 1);
+    //   if ( s.d <= s.minStepInterval ) {
+    //     s.d = s.minStepInterval;
+    //     s.rampUpStepCount = s.stepCount;
+    //   }
+    //   if ( s.stepCount >= s.totalSteps / 2 ) {
+    //     s.rampUpStepCount = s.stepCount;
+    //   }
+    // }
+    // else if ( s.stepCount >= s.totalSteps - s.rampUpStepCount ) {
+    //   s.d = (s.d * (4 * s.n + 1)) / (4 * s.n + 1 - 2);
+    //   s.n--;
+    // }
+
+    // s.di = s.d; // integer
+    // Serial.print(s.n);
+    // Serial.print(' ');
   }
+  // Serial.println();
 
   setNextInterruptInterval();
 
   TCNT1  = 0;
 }
 
-void runAndWait() {
-  setNextInterruptInterval();
-  while ( remainingSteppersFlag );
+// void runAndWait() {
+//   setNextInterruptInterval();
+//   while ( remainingSteppersFlag );
+// }
+
+void parseSerialMessage(){
+    serial_msg_t msg;
+    Serial.readBytes((char*)&msg, sizeof(msg));
+    Serial.println(String("Got cmd") + ' ' + msg.command +' ' + msg.motor + ' ' + msg.f + ' ' + msg.l);
+    switch(msg.command)
+    {
+    case CMD_MOVE_TO:
+        prepareMovement(msg.motor, msg.l);
+        break;
+    // case CMD_SET_SPEED:
+    //     steppers[msg.motor].setSpeed(msg.f);
+    //     break;
+    // case CMD_SET_ACC:
+    //     steppers[msg.motor].setAcceleration(msg.f);
+    //     break;
+    // case CMD_RESET_POS:
+    //     steppers[msg.motor].setCurrentPosition(0);
+    //     break;
+    default:
+        Serial.println("UNKNOWN COMMAND");
+        break;
+    }
+    
 }
 
 void loop() {
-
-  TIMER1_INTERRUPTS_ON
-
-  for (int i = 0; i < 4; i++) {
-    for (int k = 0; k < NUM_STEPPERS; k++) {
-      prepareMovement( k,  200 );
-      runAndWait();
-    }
-  }
-  for (int i = 0; i < 4; i++) {
-    for (int k = 0; k < NUM_STEPPERS; k++) {
-      prepareMovement( k,  200 );
-    }
-    runAndWait();
+  if(Serial.available() >= sizeof(serial_msg_t)){
+      parseSerialMessage();
   }
   
-  for (int i = 0; i < NUM_STEPPERS; i++)
-    prepareMovement( i, 400 );
-  runAndWait();
-  for (int i = 0; i < NUM_STEPPERS; i++)
-    prepareMovement( i, -400 );
-  runAndWait();
-  for (int i = 0; i < NUM_STEPPERS; i++)
-    prepareMovement( i, 200 );
-  runAndWait();
-  for (int i = 0; i < NUM_STEPPERS; i++)
-    prepareMovement( i, -200 );
-  runAndWait();
-  for (int i = 0; i < NUM_STEPPERS; i++)
-    prepareMovement( i, 600 );
-  runAndWait();
-  for (int i = 0; i < NUM_STEPPERS; i++)
-    prepareMovement( i, -600 );
-  runAndWait();
 
-  while (true);
+  // for (int i = 0; i < 4; i++) {
+  //   for (int k = 0; k < NUM_STEPPERS; k++) {
+  //     prepareMovement( k,  200 );
+  //     runAndWait();
+  //   }
+  // }
+  // for (int i = 0; i < 4; i++) {
+  //   for (int k = 0; k < NUM_STEPPERS; k++) {
+  //     prepareMovement( k,  200 );
+  //   }
+  //   runAndWait();
+  // }
+  
+  // for (int i = 0; i < NUM_STEPPERS; i++)
+  //   prepareMovement( i, 400 );
+  // runAndWait();
+  // for (int i = 0; i < NUM_STEPPERS; i++)
+  //   prepareMovement( i, -400 );
+  // runAndWait();
+  // for (int i = 0; i < NUM_STEPPERS; i++)
+  //   prepareMovement( i, 200 );
+  // runAndWait();
+  // for (int i = 0; i < NUM_STEPPERS; i++)
+  //   prepareMovement( i, -200 );
+  // runAndWait();
+  // for (int i = 0; i < NUM_STEPPERS; i++)
+  //   prepareMovement( i, 600 );
+  // runAndWait();
+  // for (int i = 0; i < NUM_STEPPERS; i++)
+  //   prepareMovement( i, -600 );
+  // runAndWait();
+
+  // while (true);
 
 }
 
