@@ -145,25 +145,36 @@ void setup() {
   interrupts();
 
 
+  unsigned int buttonMinInterval = 75;
+  float buttonAcc = 1000;
+
+
+  unsigned int axisMinInterval = 300;
+  float axisAcc = 3000;
+
+  // button
   steppers[0].dirFunc = xDir;
   steppers[0].stepFunc = xStep;
-  steppers[0].acceleration = 1000;
-  steppers[0].minStepInterval = 250;
+  steppers[0].acceleration = buttonAcc;
+  steppers[0].minStepInterval = buttonMinInterval;
 
+  // axis
   steppers[1].dirFunc = yDir;
   steppers[1].stepFunc = yStep;
-  steppers[1].acceleration = 1000;
-  steppers[1].minStepInterval = 50;
+  steppers[1].acceleration = axisAcc;
+  steppers[1].minStepInterval = axisMinInterval;
 
+  // button
   steppers[2].dirFunc = zDir;
   steppers[2].stepFunc = zStep;
-  steppers[2].acceleration = 1000;
-  steppers[2].minStepInterval = 450;
+  steppers[2].acceleration = buttonAcc;
+  steppers[2].minStepInterval = buttonMinInterval;
 
+  // axis
   steppers[3].dirFunc = aDir;
   steppers[3].stepFunc = aStep;
-  steppers[3].acceleration = 4000;
-  steppers[3].minStepInterval = 50;
+  steppers[3].acceleration = axisAcc;
+  steppers[3].minStepInterval = axisMinInterval;
 
   for(int i = 0; i < NUM_STEPPERS; i++){
     resetStepper(steppers[i]);
